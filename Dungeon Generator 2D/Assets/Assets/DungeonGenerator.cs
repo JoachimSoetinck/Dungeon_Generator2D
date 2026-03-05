@@ -1,16 +1,20 @@
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.Tilemaps;
 
 public class DungeonGenerator2D : MonoBehaviour
 {
+
     [Header("Map Settings")]
     [SerializeField] private int width = 50;
     [SerializeField] private int height = 50;
 
     [Header("Room Settings")]
     [SerializeField] private int roomCount = 15;
-    [SerializeField] private Vector2Int roomSize = new Vector2Int(4, 10);
+    [SerializeField] private Vector2Int roomSizeRange = new Vector2Int(4, 10);
+    [SerializeField] private int maxRoomAttempts = 100;
 
     [Header("Rendering")]
     [SerializeField] private Tilemap floorTilemap;
@@ -21,189 +25,118 @@ public class DungeonGenerator2D : MonoBehaviour
     [Header("Camera")]
     [SerializeField] private Camera mainCamera;
 
-    private HashSet<Vector2Int> floorPositions = new HashSet<Vector2Int>();
-    private List<RectInt> rooms = new List<RectInt>();
+    [Header("Animated Generation")]
+    [SerializeField] private bool animateGeneration = true;
+    [SerializeField] private float roomDelay = 0.3f;
+    [SerializeField] private float corridorDelay = 0.1f;
+    [SerializeField] private float tileDelay = 0.01f;
 
-    void Start()
+
+    private HashSet<Vector2Int> floorPositions = new HashSet<Vector2Int>();
+    private DungeonAnimator animator;
+
+    private void Start()
     {
         if (mainCamera == null)
             mainCamera = Camera.main;
 
-        GenerateDungeon();
         SetupCamera();
+        Regenerate();
     }
 
-    void GenerateDungeon()
+    private void Update()
     {
-        CreateRooms();
-        ConnectAllRooms();
-        RenderDungeon();
+        if (Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame)
+            Regenerate();
     }
 
-    void CreateRooms()
+    private void Regenerate()
     {
-        for (int i = 0; i < roomCount; i++)
-        {
-            RectInt room = GenerateRandomRoom();
+        StopAllCoroutines();
 
-            if (!HasOverlap(room))
-            {
-                AddRoomToMap(room);
-                rooms.Add(room);
-            }
-        }
-    }
+        animator = new DungeonAnimator(
+            floorTilemap, wallTilemap,
+            floorTile, wallTile,
+            roomDelay, corridorDelay, tileDelay,
+            width, height);
 
-    RectInt GenerateRandomRoom()
-    {
-        int w = Random.Range(roomSize.x, roomSize.y + 1);
-        int h = Random.Range(roomSize.x, roomSize.y + 1);
-        int x = Random.Range(1, width - w - 1);
-        int y = Random.Range(1, height - h - 1);
-
-        return new RectInt(x, y, w, h);
-    }
-
-    bool HasOverlap(RectInt room)
-    {
-        RectInt expandedRoom = new RectInt(
-            room.x - 1,
-            room.y - 1,
-            room.width + 2,
-            room.height + 2
-        );
-
-        foreach (var existingRoom in rooms)
-        {
-            if (expandedRoom.Overlaps(existingRoom))
-                return true;
-        }
-        return false;
-    }
-
-    void AddRoomToMap(RectInt room)
-    {
-        for (int x = room.xMin; x < room.xMax; x++)
-        {
-            for (int y = room.yMin; y < room.yMax; y++)
-            {
-                floorPositions.Add(new Vector2Int(x, y));
-            }
-        }
-    }
-
-    void ConnectAllRooms()
-    {
-        for (int i = 0; i < rooms.Count - 1; i++)
-        {
-            CreateCorridor(rooms[i], rooms[i + 1]);
-        }
-    }
-
-    void CreateCorridor(RectInt roomA, RectInt roomB)
-    {
-        Vector2Int pointA = GetCenter(roomA);
-        Vector2Int pointB = GetCenter(roomB);
-
-        if (Random.value < 0.5f)
-        {
-            CreateHorizontalLine(pointA.x, pointB.x, pointA.y);
-            CreateVerticalLine(pointA.y, pointB.y, pointB.x);
-        }
+        if (animateGeneration)
+            StartCoroutine(GenerateAnimated());
         else
-        {
-            CreateVerticalLine(pointA.y, pointB.y, pointA.x);
-            CreateHorizontalLine(pointA.x, pointB.x, pointB.y);
-        }
+            GenerateInstant();
     }
 
-    Vector2Int GetCenter(RectInt room)
+    private void GenerateInstant()
     {
-        return new Vector2Int(
-            room.xMin + room.width / 2,
-            room.yMin + room.height / 2
-        );
+        var algorithm = new RandomRoomsAlgorithm(width, height, roomCount, roomSizeRange, maxRoomAttempts);
+        floorPositions = algorithm.Generate();
+        RenderAll();
     }
 
-    void CreateHorizontalLine(int xStart, int xEnd, int y)
+    private IEnumerator GenerateAnimated()
     {
-        int min = Mathf.Min(xStart, xEnd);
-        int max = Mathf.Max(xStart, xEnd);
+        if (!ValidateTilemaps()) yield break;
 
-        for (int x = min; x <= max; x++)
-        {
-            floorPositions.Add(new Vector2Int(x, y));
-        }
+        floorTilemap.ClearAllTiles();
+        wallTilemap.ClearAllTiles();
+        floorPositions.Clear();
+
+        yield return null;
+
+        var algorithm = new RandomRoomsAlgorithm(width, height, roomCount, roomSizeRange, maxRoomAttempts);
+        algorithm.Generate();
+        var rooms = new List<RectInt>(algorithm.Rooms);
+
+        yield return StartCoroutine(animator.AnimateGeneration(rooms, floorPositions));
     }
 
-    void CreateVerticalLine(int yStart, int yEnd, int x)
-    {
-        int min = Mathf.Min(yStart, yEnd);
-        int max = Mathf.Max(yStart, yEnd);
 
-        for (int y = min; y <= max; y++)
-        {
-            floorPositions.Add(new Vector2Int(x, y));
-        }
-    }
-
-    void RenderDungeon()
+    private void RenderAll()
     {
-        // Clear beide tilemaps
         floorTilemap.ClearAllTiles();
         wallTilemap.ClearAllTiles();
 
-        // Teken floors op floor tilemap
         foreach (var pos in floorPositions)
-        {
             floorTilemap.SetTile(new Vector3Int(pos.x, pos.y, 0), floorTile);
-        }
 
-        // Teken walls op wall tilemap
-        foreach (var floorPos in floorPositions)
-        {
-            for (int x = -1; x <= 1; x++)
-            {
-                for (int y = -1; y <= 1; y++)
-                {
-                    Vector2Int neighborPos = floorPos + new Vector2Int(x, y);
-
-                    if (!floorPositions.Contains(neighborPos) &&
-                        IsInBounds(neighborPos))
-                    {
-                        wallTilemap.SetTile(
-                            new Vector3Int(neighborPos.x, neighborPos.y, 0),
-                            wallTile
-                        );
-                    }
-                }
-            }
-        }
+        foreach (var pos in floorPositions)
+            CarveWallsAround(pos);
     }
 
-    bool IsInBounds(Vector2Int pos)
+    private void CarveWallsAround(Vector2Int center)
     {
-        return pos.x >= 0 && pos.x < width && pos.y >= 0 && pos.y < height;
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                var neighbor = center + new Vector2Int(dx, dy);
+
+                if (!floorPositions.Contains(neighbor) && IsInBounds(neighbor))
+                    wallTilemap.SetTile(new Vector3Int(neighbor.x, neighbor.y, 0), wallTile);
+            }
     }
 
-    void SetupCamera()
+ 
+    private bool IsInBounds(Vector2Int pos) =>
+        pos.x >= 0 && pos.x < width && pos.y >= 0 && pos.y < height;
+
+    private bool ValidateTilemaps()
+    {
+        if (floorTilemap != null && wallTilemap != null) return true;
+        Debug.LogError("Tilemaps not assigned!");
+        return false;
+    }
+
+    private void SetupCamera()
     {
         if (mainCamera == null) return;
 
-        // Centreer camera op dungeon
-        float centerX = width / 2f;
-        float centerY = height / 2f;
+        mainCamera.orthographic = true;
+        mainCamera.transform.position = new Vector3(width / 2f, height / 2f, -10f);
 
-        mainCamera.transform.position = new Vector3(centerX, centerY, -10f);
-
-        // Bereken orthographic size om hele dungeon te laten zien
-        float aspectRatio = (float)Screen.width / Screen.height;
+        float aspect = (float)Screen.width / Screen.height;
         float verticalSize = height / 2f + 5f;
-        float horizontalSize = (width / 2f + 5f) / aspectRatio;
+        float horizontalSize = (width / 2f + 5f) / aspect;
 
         mainCamera.orthographicSize = Mathf.Max(verticalSize, horizontalSize);
-
-        // Zorg dat camera orthographic is
-        mainCamera.orthographic = true;
     }
 }
